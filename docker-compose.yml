@@ -1,0 +1,146 @@
+version: '3'
+services:
+  postgres-airflow:
+    image: postgres
+    container_name: postgres-airflow
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pssd}
+      POSTGRES_USER: ${POSTGRES_USER:-airflowuser}
+      POSTGRES_DB: ${POSTGRES_DB:-airflowdb}
+      AIRFLOW_SCHEMA: ${AIRFLOW_SCHEMA:-airflow}
+    expose:
+      - 5432
+    restart: always
+    volumes:
+      - ./postgres/scripts:/docker-entrypoint-initdb.d
+      # - ./sample_data:/sample_data
+    networks:
+      - common_network
+
+  postgres-dbt:
+    image: postgres
+    container_name: postgres-dbt
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pssd}
+      POSTGRES_USER: ${POSTGRES_USER:-dbtuser}
+      POSTGRES_DB: ${POSTGRES_DB:-dbtdb}
+      DBT_SCHEMA: ${DBT_SCHEMA:-dbt}
+      DBT_RAW_DATA_SCHEMA: ${DBT_RAW_DATA_SCHEMA:-dbt_raw_data}
+    expose:
+      - 5432
+    restart: always
+    volumes:
+      - ./sample_data:/sample_data
+    networks:
+      - common_network
+
+  airflow:
+    build: ./airflow/
+    container_name: airflow
+    restart: always
+    environment: 
+      DBT_PROFILES_DIR: /dbt
+      AIRFLOW_HOME: /airflow
+      PYTHON_DEPS: flask-session==0.3.2
+      AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
+      AIRFLOW__CORE__PARALLELISM: 4
+      AIRFLOW__CORE__DAG_CONCURRENCY: 4
+      AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 4
+      # AIRFLOW__ADMIN__HIDE_SENSITIVE_VARIABLE_FIELDS: False
+      # Postgres details need to match with the values defined in the postgres-airflow service
+      POSTGRES_USER: airflowuser
+      POSTGRES_PASSWORD: pssd
+      POSTGRES_HOST: postgres-airflow
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: airflowdb
+      # postgres-dbt connection details. Required for the inital loading of seed data
+      # Credentials need to match with service postgres-dbt
+      DBT_POSTGRES_PASSWORD: pssd
+      DBT_POSTGRES_USER : dbtuser
+      DBT_POSTGRES_DB : dbtdb
+      DBT_DBT_SCHEMA: dbt
+      DBT_DBT_RAW_DATA_SCHEMA: dbt_raw_data
+      DBT_POSTGRES_HOST: postgres-dbt
+      # AIRFLOW__METRICS__OTEL_ON: "True"
+      # AIRFLOW__METRICS__OTEL_HOST: otel-collector
+      # AIRFLOW__METRICS__OTEL_PORT: 4318  # Change this to 4317 for gRPC
+      # AIRFLOW__METRICS__OTEL_INTERVAL_MILLISECONDS: 30000
+      # AIRFLOW__TRACES__OTEL_ON: "True"
+      # AIRFLOW__TRACES__OTEL_HOST: otel-collector
+      # AIRFLOW__TRACES__OTEL_PORT: 4318  # Change this to 4317 for gRPC
+      # AIRFLOW__TRACES__OTEL_DEBUGGING_ON: "False"
+      # AIRFLOW__TRACES__OTEL_TASK_LOG_EVENT: "True"
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+    depends_on:
+      - postgres-airflow
+      - postgres-dbt
+      - vault
+      - vault-initializer
+    ports:
+      - 8000:8080
+    volumes:
+      - ./dbt:/dbt
+      - ./airflow:/airflow
+    networks:
+      - common_network
+
+  adminer:
+    image: adminer
+    container_name: adminer
+    restart: always
+    ports:
+      - 8080:8080
+    depends_on:
+      - postgres-airflow
+      - postgres-dbt
+    networks:
+      - common_network
+  
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - common_network
+
+  vault-initializer:
+    image: hashicorp/vault:latest
+    container_name: vault-initializer
+    depends_on:
+      - vault
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      sleep 5 &&
+      vault secrets enable -path=postgres kv-v2 &&
+      vault kv put postgres/airflow-db \
+        password=pssd \
+        user=airflowuser \
+        db=airflowdb \
+        schema=airflow &&
+      vault kv put postgres/dbt-db \
+        password=pssd \
+        user=dbtuser \
+        db=dbtdb \
+        schema=dbt \
+        raw_data_schema=dbt_raw_data
+      "
+    networks:
+      - common_network
+
+networks:
+  common_network:
+
+volumes:
+  grafana-storage:
